@@ -1,96 +1,99 @@
 #!/bin/sh
 
-# Constantes do projeto
+# Define constants
 BASE_URL="https://raw.githubusercontent.com/xchwarze/frieren-release/master/packages/openwrt"
 PACKAGE_NAME="frieren"
-TMP_APK="/tmp/package.apk"
 
-# Opção de instalação forçada (ex: -f)
-FORCE_INSTALL="$1"
+# Get force install option from command line (if provided)
+FORCE_INSTALL=$1
 
-# Logger com timestamp
+# Logger function
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$2] $1"
 }
 
-# Tratamento de erros
+# Error handler function
 handle_error() {
-    log "Erro: $2 (Código: $1)" "ERROR"
+    log "Error: $2 (Exit Code: $1)" "ERROR"
     if [ "$1" -eq 1 ] && [ -z "$FORCE_INSTALL" ]; then
-        log "Dica: Execute com '-f' para forçar a instalação." "INFO"
+        log "Tip: Run the script with '-f' to force the installation if you encounter file clashes." "INFO"
     fi
+
     exit "$1"
 }
 
-# Obtém a URL do pacote baseado na versão
+# Function to check OpenWRT version and return package URL
 get_package_url() {
-    local version="$(awk -F"'" '/DISTRIB_RELEASE/{print $2}' /etc/openwrt_release | cut -d'.' -f1)"
-    
-    if [ "$version" -ge 20 ]; then
-        echo "${BASE_URL}/latest/${PACKAGE_NAME}_latest.ipk"
-    else
-        echo "${BASE_URL}/19/${PACKAGE_NAME}_latest.ipk"
+    local version="$1"
+    local package_url=""
+
+    if [ "$version" = "19" ]; then
+        package_url="${BASE_URL}/19/${PACKAGE_NAME}_latest.ipk"
+    elif [ "$version" -ge 20 ]; then
+        package_url="${BASE_URL}/latest/${PACKAGE_NAME}_latest.ipk"
     fi
+
+    echo "$package_url"
 }
 
-# Remove versão antiga se existir
+# Function to uninstall old package
 uninstall_old_package() {
-    if apk info "$PACKAGE_NAME" >/dev/null 2>&1; then
-        log "Removendo pacote antigo: $PACKAGE_NAME..." "INFO"
-        apk del "$PACKAGE_NAME" || handle_error 1 "Falha ao remover pacote via apk del"
+    if opkg list-installed | grep -q "$PACKAGE_NAME"; then
+        log "Removing old package $PACKAGE_NAME..." "INFO"
+        opkg remove "$PACKAGE_NAME" || handle_error 1 "Failed to remove old package $PACKAGE_NAME"
     fi
 }
 
-# Instalação principal
+# Main installation function
 install_package() {
-    local package_url="$(get_package_url)"
-    
+    local version="$(awk -F"'" '/DISTRIB_RELEASE/{print $2}' /etc/openwrt_release | cut -d'.' -f1)"
+    local package_url="$(get_package_url "$version")"
+
     if [ -z "$package_url" ]; then
-        handle_error 1 "Não foi possível determinar a URL do pacote."
+        handle_error 1 "Failed to obtain package URL for version $version"
     fi
 
-    log "Atualizando índices do APK..." "INFO"
-    apk update || handle_error 1 "Falha no apk update"
+    log "Updating package lists..." "INFO"
+    opkg update || handle_error 1 "Failed to update package lists"
 
-    log "Baixando e instalando pacote..." "INFO"
-    wget -qO "$TMP_APK" "$package_url" || handle_error 1 "Falha no download via wget"
+    log "Downloading and installing package for OpenWRT $version..." "INFO"
+    wget -qO /tmp/package.ipk "$package_url" && {
+        if [ "$FORCE_INSTALL" = "-f" ]; then
+            opkg install --force-overwrite /tmp/package.ipk || handle_error 1 "Package installation failed, even with force-overwrite"
+        else
+            opkg install /tmp/package.ipk || handle_error 1 "Package installation failed"
+        fi
+    }
 
-    local apk_cmd="apk add --allow-untrusted"
-    
-    if [ "$FORCE_INSTALL" = "-f" ]; then
-        $apk_cmd --force-overwrite "$TMP_APK" || handle_error 1 "Falha na instalação forçada"
-    else
-        $apk_cmd "$TMP_APK" || handle_error 1 "Falha na instalação padrão"
-    fi
-
-    log "Instalação concluída com sucesso via APK" "SUCCESS"
-    rm -f "$TMP_APK"
+    log "Package installation completed successfully" "SUCCESS"
 }
 
-# Reinicia serviços necessários
+# Display panel URL
+display_access_url() {
+    local ip_address="$(ip -4 addr show br-lan | awk '/inet/ {print $2}' | cut -d'/' -f1)"
+    log "To access the Frieren web interface, open a web browser and navigate to: http://$ip_address:5000/" "INFO"
+}
+
+# Restart necessary services
 restart_services() {
-    log "Reiniciando serviços (Nginx/PHP)..." "INFO"
+    log "Restarting PHP-FPM and NGINX..." "INFO"
     /etc/init.d/nginx restart
-    
-    if [ -x "/etc/init.d/php8-fpm" ]; then
+
+    if [ -f "/etc/php8-fpm.conf" ]; then    
         /etc/init.d/php8-fpm restart
-    elif [ -x "/etc/init.d/php7-fpm" ]; then
+    else
         /etc/init.d/php7-fpm restart
     fi
 }
 
-display_access_url() {
-    local ip_address="$(ip -4 addr show br-lan | awk '/inet/ {print $2}' | cut -d'/' -f1)"
-    log "Acesse a interface em: http://$ip_address:5000/" "INFO"
-}
-
-# Execução
+# Ensure the script is running on OpenWRT
 if [ -f "/etc/openwrt_release" ]; then
+    log "OpenWRT system detected, proceeding with installation..." "INFO"
     uninstall_old_package
     install_package
     restart_services
     display_access_url
 else
-    log "Este sistema não parece ser OpenWrt." "ERROR"
+    log "This script is only supported on OpenWRT systems." "ERROR"
     exit 1
 fi
