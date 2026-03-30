@@ -1,125 +1,98 @@
 #!/bin/sh
 
-# Define constants
+# Constantes do projeto
 BASE_URL="https://raw.githubusercontent.com/xchwarze/frieren-release/master/packages/openwrt"
 PACKAGE_NAME="frieren"
+TMP_APK="/tmp/package.apk"
 
-# Get force install option from command line
+# Opção de instalação forçada (ex: -f)
 FORCE_INSTALL=$1
 
-# Detect package manager
-if command -v apk >/dev/null 2>&1; then
-    PKG_MGR="apk"
-elif command -v opkg >/dev/null 2>&1; then
-    PKG_MGR="opkg"
-else
-    echo "Error: No package manager (apk or opkg) found."
-    exit 1
-fi
-
-# Logger function
+# Logger com timestamp
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$2] $1"
 }
 
-# Error handler function
+# Tratamento de erros
 handle_error() {
-    log "Error: $2 (Exit Code: $1)" "ERROR"
-    if [ "$1" -eq 1 ] && [ -z "$FORCE_INSTALL" ]; then
-        log "Tip: Run the script with '-f' to force the installation if you encounter file clashes." "INFO"
-    fi
+    log "Erro: $2 (Código: $1)" "ERROR"
+    [ "$1" -eq 1 ] && [ -z "$FORCE_INSTALL" ] && \
+        log "Dica: Execute com '-f' para forçar a instalação (ignore-conffiles)." "INFO"
     exit "$1"
 }
 
-# Function to check OpenWRT version and return package URL
+# Obtém a URL do pacote baseado na versão (OpenWrt 25.x usa o path 'latest')
 get_package_url() {
-    local version="$1"
-    local package_url=""
-
-    # Se for versão 21 ou superior (incluindo a 25.x), usa o path 'latest'
-    if [ "$version" = "19" ]; then
-        package_url="${BASE_URL}/19/${PACKAGE_NAME}_latest.ipk"
-    elif [ "$version" -ge 20 ]; then
-        package_url="${BASE_URL}/latest/${PACKAGE_NAME}_latest.ipk"
-    fi
-
-    echo "$package_url"
-}
-
-# Function to uninstall old package
-uninstall_old_package() {
-    local installed=0
-    
-    if [ "$PKG_MGR" = "apk" ]; then
-        apk info "$PACKAGE_NAME" >/dev/null 2>&1 && installed=1
-    else
-        opkg list-installed | grep -q "$PACKAGE_NAME" && installed=1
-    fi
-
-    if [ "$installed" -eq 1 ]; then
-        log "Removing old package $PACKAGE_NAME using $PKG_MGR..." "INFO"
-        if [ "$PKG_MGR" = "apk" ]; then
-            apk del "$PACKAGE_NAME" || handle_error 1 "Failed to remove old package via apk"
-        else
-            opkg remove "$PACKAGE_NAME" || handle_error 1 "Failed to remove old package via opkg"
-        fi
-    fi
-}
-
-# Main installation function
-install_package() {
     local version="$(awk -F"'" '/DISTRIB_RELEASE/{print $2}' /etc/openwrt_release | cut -d'.' -f1)"
-    local package_url="$(get_package_url "$version")"
+    
+    # Para a versão 25.12.2, o fallback é o diretório 'latest'
+    if [ "$version" -ge 20 ]; then
+        echo "${BASE_URL}/latest/${PACKAGE_NAME}_latest.ipk"
+    else
+        echo "${BASE_URL}/19/${PACKAGE_NAME}_latest.ipk"
+    fi
+}
 
-    if [ -z "$package_url" ]; then
-        handle_error 1 "Failed to obtain package URL for version $version"
+# Remove versão antiga se existir (Sintaxe APK)
+uninstall_old_package() {
+    if apk info "$PACKAGE_NAME" >/dev/null 2>&1; then
+        log "Removendo pacote antigo: $PACKAGE_NAME..." "INFO"
+        apk del "$PACKAGE_NAME" || handle_error 1 "Falha ao remover pacote via apk del"
+    fi
+}
+
+# Instalação principal
+install_package() {
+    local package_url=$(get_package_url)
+    
+    [ -z "$package_url" ] && handle_error 1 "Não foi possível determinar a URL do pacote."
+
+    log "Atualizando índices do APK..." "INFO"
+    apk update || handle_error 1 "Falha no apk update"
+
+    log "Baixando e instalando pacote..." "INFO"
+    wget -qO "$TMP_APK" "$package_url" || handle_error 1 "Falha no download via wget"
+
+    # No APK, instalamos o arquivo local. 
+    # --allow-untrusted é essencial para arquivos .ipk/.apk externos (não assinados pelo repo oficial)
+    local apk_cmd="apk add --allow-untrusted"
+    
+    if [ "$FORCE_INSTALL" = "-f" ]; then
+        # --force-overwrite no apk substitui arquivos conflitantes
+        $apk_cmd --force-overwrite "$TMP_APK" || handle_error 1 "Falha na instalação forçada"
+    else
+        $apk_cmd "$TMP_APK" || handle_error 1 "Falha na instalação padrão"
     fi
 
-    log "Updating package lists using $PKG_MGR..." "INFO"
-    $PKG_MGR update || handle_error 1 "Failed to update package lists"
-
-    log "Downloading and installing package for OpenWRT $version..." "INFO"
-    wget -qO /tmp/package.ipk "$package_url" && {
-        if [ "$PKG_MGR" = "apk" ]; then
-            # No apk, --allow-untrusted é comum para pacotes .ipk/local, 
-            # e force-overwrite é simulado ou tratado pelo apk add
-            local apk_args="add --allow-untrusted"
-            [ "$FORCE_INSTALL" = "-f" ] && apk_args="$apk_args --force-overwrite"
-            apk $apk_args /tmp/package.ipk || handle_error 1 "APK installation failed"
-        else
-            local opkg_args="install"
-            [ "$FORCE_INSTALL" = "-f" ] && opkg_args="install --force-overwrite"
-            opkg $opkg_args /tmp/package.ipk || handle_error 1 "OPKG installation failed"
-        fi
-    }
-
-    log "Package installation completed successfully" "SUCCESS"
+    log "Instalação concluída com sucesso via APK" "SUCCESS"
+    rm -f "$TMP_APK"
 }
 
-# ... rest of the functions (restart_services, display_access_url) remain the same ...
-
-display_access_url() {
-    local ip_address="$(ip -4 addr show br-lan | awk '/inet/ {print $2}' | cut -d'/' -f1)"
-    log "To access the Frieren web interface: http://$ip_address:5000/" "INFO"
-}
-
+# Reinicia serviços necessários
 restart_services() {
-    log "Restarting services..." "INFO"
+    log "Reiniciando serviços (Nginx/PHP)..." "INFO"
     /etc/init.d/nginx restart
-    if [ -f "/etc/php8-fpm.conf" ] || [ -d "/etc/php8" ]; then    
+    
+    # Checa PHP 8 (padrão em versões novas) ou fallback 7
+    if [ -x "/etc/init.d/php8-fpm" ]; then
         /etc/init.d/php8-fpm restart
-    else
+    elif [ -x "/etc/init.d/php7-fpm" ]; then
         /etc/init.d/php7-fpm restart
     fi
 }
 
+display_access_url() {
+    local ip_address=$(ip -4 addr show br-lan | awk '/inet/ {print $2}' | cut -d'/' -f1)
+    log "Acesse a interface em: http://$ip_address:5000/" "INFO"
+}
+
+# Execução
 if [ -f "/etc/openwrt_release" ]; then
-    log "OpenWRT system detected ($PKG_MGR mode), proceeding..." "INFO"
     uninstall_old_package
     install_package
     restart_services
     display_access_url
 else
-    log "This script is only supported on OpenWRT systems." "ERROR"
+    log "Este sistema não parece ser OpenWrt." "ERROR"
     exit 1
 fi
