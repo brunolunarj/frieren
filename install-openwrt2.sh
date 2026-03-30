@@ -6,7 +6,7 @@ PACKAGE_NAME="frieren"
 TMP_APK="/tmp/package.apk"
 
 # Opção de instalação forçada (ex: -f)
-FORCE_INSTALL=$1
+FORCE_INSTALL="$1"
 
 # Logger com timestamp
 log() {
@@ -16,16 +16,16 @@ log() {
 # Tratamento de erros
 handle_error() {
     log "Erro: $2 (Código: $1)" "ERROR"
-    [ "$1" -eq 1 ] && [ -z "$FORCE_INSTALL" ] && \
-        log "Dica: Execute com '-f' para forçar a instalação (ignore-conffiles)." "INFO"
+    if [ "$1" -eq 1 ] && [ -z "$FORCE_INSTALL" ]; then
+        log "Dica: Execute com '-f' para forçar a instalação." "INFO"
+    fi
     exit "$1"
 }
 
-# Obtém a URL do pacote baseado na versão (OpenWrt 25.x usa o path 'latest')
+# Obtém a URL do pacote baseado na versão
 get_package_url() {
     local version="$(awk -F"'" '/DISTRIB_RELEASE/{print $2}' /etc/openwrt_release | cut -d'.' -f1)"
     
-    # Para a versão 25.12.2, o fallback é o diretório 'latest'
     if [ "$version" -ge 20 ]; then
         echo "${BASE_URL}/latest/${PACKAGE_NAME}_latest.ipk"
     else
@@ -33,7 +33,7 @@ get_package_url() {
     fi
 }
 
-# Remove versão antiga se existir (Sintaxe APK)
+# Remove versão antiga se existir
 uninstall_old_package() {
     if apk info "$PACKAGE_NAME" >/dev/null 2>&1; then
         log "Removendo pacote antigo: $PACKAGE_NAME..." "INFO"
@@ -43,9 +43,11 @@ uninstall_old_package() {
 
 # Instalação principal
 install_package() {
-    local package_url=$(get_package_url)
+    local package_url="$(get_package_url)"
     
-    [ -z "$package_url" ] && handle_error 1 "Não foi possível determinar a URL do pacote."
+    if [ -z "$package_url" ]; then
+        handle_error 1 "Não foi possível determinar a URL do pacote."
+    fi
 
     log "Atualizando índices do APK..." "INFO"
     apk update || handle_error 1 "Falha no apk update"
@@ -53,12 +55,9 @@ install_package() {
     log "Baixando e instalando pacote..." "INFO"
     wget -qO "$TMP_APK" "$package_url" || handle_error 1 "Falha no download via wget"
 
-    # No APK, instalamos o arquivo local. 
-    # --allow-untrusted é essencial para arquivos .ipk/.apk externos (não assinados pelo repo oficial)
     local apk_cmd="apk add --allow-untrusted"
     
     if [ "$FORCE_INSTALL" = "-f" ]; then
-        # --force-overwrite no apk substitui arquivos conflitantes
         $apk_cmd --force-overwrite "$TMP_APK" || handle_error 1 "Falha na instalação forçada"
     else
         $apk_cmd "$TMP_APK" || handle_error 1 "Falha na instalação padrão"
@@ -73,7 +72,6 @@ restart_services() {
     log "Reiniciando serviços (Nginx/PHP)..." "INFO"
     /etc/init.d/nginx restart
     
-    # Checa PHP 8 (padrão em versões novas) ou fallback 7
     if [ -x "/etc/init.d/php8-fpm" ]; then
         /etc/init.d/php8-fpm restart
     elif [ -x "/etc/init.d/php7-fpm" ]; then
@@ -82,7 +80,7 @@ restart_services() {
 }
 
 display_access_url() {
-    local ip_address=$(ip -4 addr show br-lan | awk '/inet/ {print $2}' | cut -d'/' -f1)
+    local ip_address="$(ip -4 addr show br-lan | awk '/inet/ {print $2}' | cut -d'/' -f1)"
     log "Acesse a interface em: http://$ip_address:5000/" "INFO"
 }
 
